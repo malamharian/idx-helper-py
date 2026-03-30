@@ -1,0 +1,26 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - run: uv run flet build macos --product "IDX Helper"
+
+      - name: Zip the app
+        run: |
+          cd build/macos
+          zip -r IDX-Helper-macOS.zip *.app
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/macos/IDX-Helper-macOS.zip
