@@ -35,7 +35,7 @@ Requires Python 3.10 - 3.12.
 uv sync
 
 # Run the app
-uv run app.py
+uv run main.py
 ```
 
 ## Build Executable
