@@ -6,9 +6,10 @@ from datetime import datetime
 
 import flet as ft
 
+import aggregator
 import scraper
 
-MAX_CONCURRENT_DOWNLOADS = 5
+DEFAULT_CONCURRENCY = 5
 
 
 async def main(page: ft.Page):
@@ -18,13 +19,13 @@ async def main(page: ft.Page):
     page.window.height = 720
 
     session = scraper.create_session()
-    download_sem = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+    download_sem = asyncio.Semaphore(DEFAULT_CONCURRENCY)
 
     company_controls: dict[str, dict] = {}
     cancel_flags: dict[str, threading.Event] = {}
     company_attachments: dict[str, list[dict]] = {}
 
-    # ── Log panel ──────────────────────────────────────────────
+    # ── Shared log panel ──────────────────────────────────────
 
     log_column = ft.Column(spacing=1, scroll=ft.ScrollMode.AUTO, auto_scroll=True)
     log_container = ft.Container(
@@ -42,6 +43,14 @@ async def main(page: ft.Page):
             log_column.controls.pop(0)
         log_container.visible = True
         page.update()
+
+    # ── Shared file picker service ────────────────────────────
+
+    dir_picker = ft.FilePicker()
+
+    # ══════════════════════════════════════════════════════════
+    # TAB 1: Download
+    # ══════════════════════════════════════════════════════════
 
     # ── Year / Period ──────────────────────────────────────────
 
@@ -121,10 +130,6 @@ async def main(page: ft.Page):
     )
     results_section = ft.Column(visible=False, expand=True)
 
-    # ── File picker ────────────────────────────────────────────
-
-    dir_picker = ft.FilePicker()
-
     async def pick_download_dir(e):
         path = await dir_picker.get_directory_path(dialog_title="Choose Download Directory")
         if path:
@@ -166,10 +171,6 @@ async def main(page: ft.Page):
             elif regex_pat and regex_pat.search(att.get("File_Name", "")):
                 out.append(att)
         return out
-
-    def summarize_atts(attachments: list[dict]) -> str:
-        c = Counter(a.get("File_Type", "?") for a in attachments)
-        return ", ".join(f"{v}x {k}" for k, v in sorted(c.items())) or "no files"
 
     def summarize_filters() -> str:
         if cb_all.value:
@@ -255,6 +256,14 @@ async def main(page: ft.Page):
         )
 
     # ── Download logic ─────────────────────────────────────────
+
+    async def flash_pick_dir_error():
+        pick_dir_btn.style = ft.ButtonStyle(bgcolor=ft.Colors.ERROR)
+        log("Please select a download directory first.")
+        page.update()
+        await asyncio.sleep(2)
+        pick_dir_btn.style = None
+        page.update()
 
     async def download_company(code: str):
         ctrl = company_controls.get(code)
@@ -390,14 +399,6 @@ async def main(page: ft.Page):
 
     # ── Start All / Cancel All ─────────────────────────────────
 
-    async def flash_pick_dir_error():
-        pick_dir_btn.style = ft.ButtonStyle(bgcolor=ft.Colors.ERROR)
-        log("Please select a download directory first.")
-        page.update()
-        await asyncio.sleep(2)
-        pick_dir_btn.style = None
-        page.update()
-
     def on_start_all(e):
         download_dir = download_dir_text.value
         if not download_dir or download_dir == "No directory selected":
@@ -410,6 +411,23 @@ async def main(page: ft.Page):
     def on_cancel_all(e):
         for f in cancel_flags.values():
             f.set()
+
+    def on_concurrency_changed(e):
+        nonlocal download_sem
+        try:
+            val = max(1, int(concurrency_dd.value))
+        except (ValueError, TypeError):
+            return
+        download_sem = asyncio.Semaphore(val)
+
+    concurrency_dd = ft.Dropdown(
+        label="Concurrency",
+        editable=True,
+        width=130,
+        options=[ft.dropdown.Option(str(i)) for i in (1, 2, 3, 5, 8, 10, 15, 20)],
+        value=str(DEFAULT_CONCURRENCY),
+    )
+    concurrency_dd.on_change = on_concurrency_changed
 
     start_all_btn = ft.Button(
         "Start All",
@@ -427,7 +445,7 @@ async def main(page: ft.Page):
         on_click=pick_download_dir,
     )
 
-    # ── Layout ─────────────────────────────────────────────────
+    # ── Download tab layout ────────────────────────────────────
 
     controls_section = ft.Column(
         [
@@ -455,6 +473,7 @@ async def main(page: ft.Page):
                 pick_dir_btn,
                 download_dir_text,
                 ft.Container(expand=True),
+                concurrency_dd,
                 start_all_btn,
                 cancel_all_btn,
             ],
@@ -464,10 +483,197 @@ async def main(page: ft.Page):
         results_container,
     ]
 
+    download_tab_content = ft.Container(
+        content=ft.Column(
+            [controls_section, ft.Divider(), results_section],
+            expand=True,
+            spacing=12,
+        ),
+        expand=True,
+        padding=ft.Padding.only(top=16),
+    )
+
+    # ══════════════════════════════════════════════════════════
+    # TAB 2: Aggregate
+    # ══════════════════════════════════════════════════════════
+
+    agg_input_dir_text = ft.Text(
+        "No directory selected",
+        italic=True,
+        color=ft.Colors.ON_SURFACE_VARIANT,
+    )
+    agg_output_text = ft.Text(
+        "No output file selected",
+        italic=True,
+        color=ft.Colors.ON_SURFACE_VARIANT,
+    )
+    agg_progress = ft.ProgressBar(value=0, visible=False)
+    agg_status = ft.Text("", size=12)
+    agg_cancel_flag = threading.Event()
+
+    save_picker = ft.FilePicker()
+
+    async def pick_agg_input(e):
+        path = await dir_picker.get_directory_path(dialog_title="Choose directory with .xlsx files")
+        if path:
+            agg_input_dir_text.value = path
+            agg_input_dir_text.italic = False
+            agg_input_dir_text.color = None
+            page.update()
+
+    async def pick_agg_output(e):
+        path = await save_picker.save_file(
+            dialog_title="Save aggregated file as",
+            file_name="aggregated_financial_statements.xlsx",
+            allowed_extensions=["xlsx"],
+        )
+        if path:
+            if not path.endswith(".xlsx"):
+                path += ".xlsx"
+            agg_output_text.value = path
+            agg_output_text.italic = False
+            agg_output_text.color = None
+            page.update()
+
+    agg_pick_input_btn = ft.Button(
+        "Input Directory",
+        icon=ft.Icons.FOLDER_OPEN,
+        on_click=pick_agg_input,
+    )
+    agg_pick_output_btn = ft.Button(
+        "Output File",
+        icon=ft.Icons.SAVE,
+        on_click=pick_agg_output,
+    )
+
+    async def on_aggregate(e):
+        input_dir = agg_input_dir_text.value
+        output_path = agg_output_text.value
+
+        if not input_dir or input_dir == "No directory selected":
+            agg_pick_input_btn.style = ft.ButtonStyle(bgcolor=ft.Colors.ERROR)
+            log("Please select an input directory.")
+            page.update()
+            await asyncio.sleep(2)
+            agg_pick_input_btn.style = None
+            page.update()
+            return
+
+        if not output_path or output_path == "No output file selected":
+            agg_pick_output_btn.style = ft.ButtonStyle(bgcolor=ft.Colors.ERROR)
+            log("Please select an output file.")
+            page.update()
+            await asyncio.sleep(2)
+            agg_pick_output_btn.style = None
+            page.update()
+            return
+
+        agg_cancel_flag.clear()
+        agg_btn.disabled = True
+        agg_cancel_btn.disabled = False
+        agg_progress.visible = True
+        agg_progress.value = None  # indeterminate
+        agg_status.value = "Aggregating..."
+        page.update()
+
+        def on_progress(msg: str):
+            log(msg)
+
+        try:
+            success, errors = await asyncio.to_thread(
+                aggregator.aggregate,
+                input_dir,
+                output_path,
+                workers=8,
+                on_progress=on_progress,
+                cancelled=agg_cancel_flag.is_set,
+            )
+            if success:
+                agg_status.value = f"Done! {len(errors)} error(s)" if errors else "Done!"
+            else:
+                agg_status.value = "Cancelled" if agg_cancel_flag.is_set() else "Failed"
+        except Exception as ex:
+            log(f"Aggregate error: {ex}")
+            agg_status.value = "Error"
+
+        agg_btn.disabled = False
+        agg_cancel_btn.disabled = True
+        agg_progress.visible = False
+        page.update()
+
+    def on_agg_cancel(e):
+        agg_cancel_flag.set()
+
+    agg_btn = ft.Button(
+        "Aggregate",
+        icon=ft.Icons.MERGE_TYPE,
+        on_click=on_aggregate,
+    )
+    agg_cancel_btn = ft.OutlinedButton(
+        "Cancel",
+        icon=ft.Icons.CANCEL,
+        on_click=on_agg_cancel,
+        disabled=True,
+    )
+
+    aggregate_tab_content = ft.Container(
+        content=ft.Column(
+            [
+                ft.Text(
+                    "Merge all .xlsx files from a directory into a single file, grouped by sheet name.",
+                    size=13,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+                ft.Row(
+                    [agg_pick_input_btn, agg_input_dir_text],
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [agg_pick_output_btn, agg_output_text],
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row([agg_btn, agg_cancel_btn, agg_status], spacing=10),
+                agg_progress,
+            ],
+            spacing=16,
+        ),
+        padding=ft.Padding.only(top=16),
+    )
+
+    # ══════════════════════════════════════════════════════════
+    # Tabs + Layout
+    # ══════════════════════════════════════════════════════════
+
+    tab_bar = ft.TabBar(
+        tabs=[
+            ft.Tab(label="Download"),
+            ft.Tab(label="Aggregate"),
+        ],
+    )
+    tab_view = ft.TabBarView(
+        controls=[
+            download_tab_content,
+            aggregate_tab_content,
+        ],
+        expand=True,
+    )
+    tabs = ft.Tabs(
+        length=2,
+        selected_index=0,
+        expand=True,
+        content=ft.Column(
+            controls=[tab_bar, tab_view],
+            expand=True,
+        ),
+    )
+
     page.services.append(dir_picker)
+    page.services.append(save_picker)
     page.add(
         ft.Column(
-            [controls_section, ft.Divider(), results_section, log_container],
+            [tabs, log_container],
             expand=True,
             spacing=12,
         )
