@@ -1,3 +1,5 @@
+# docs: https://docs.flet.dev/publish/#github-actions/
+
 name: Build and Release
 
 on:
@@ -5,68 +7,69 @@ on:
     tags:
       - 'v*'
 
+env:
+  UV_PYTHON: 3.12
+  PYTHONUTF8: 1
+  FLET_CLI_NO_RICH_OUTPUT: 1
+
 jobs:
-  build-macos:
-    runs-on: macos-14
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            runner: macos-latest
+            build_cmd: "flet build macos"
+            artifact_path: build/macos
+
+          - name: windows
+            runner: windows-latest
+            build_cmd: "flet build windows"
+            artifact_path: build/windows
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.41.4'
-          channel: 'stable'
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
 
-      - uses: astral-sh/setup-uv@v4
-
-      - run: uv run flet build macos --product "IDX Helper"
-
-      - name: Zip the app
+      - name: Build app
+        shell: bash
         run: |
-          cd build/macos
-          zip -r IDX-Helper-macOS.zip *.app
+          uv run ${{ matrix.build_cmd }} --yes --verbose --product "IDX Helper"
 
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v5.0.0
         with:
-          name: macos-build
-          path: build/macos/IDX-Helper-macOS.zip
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.41.4'
-          channel: 'stable'
-
-      - uses: astral-sh/setup-uv@v4
-
-      - run: uv run flet build windows --product "IDX Helper"
-        env:
-          PYTHONIOENCODING: utf-8
-          PYTHONUTF8: 1
-
-      - name: Zip the app
-        run: Compress-Archive -Path build/windows/* -DestinationPath build/windows/IDX-Helper-Windows.zip
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build
-          path: build/windows/IDX-Helper-Windows.zip
+          name: ${{ matrix.name }}-build-artifact
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          overwrite: false
 
   release:
-    needs: [build-macos, build-windows]
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
 
+      - name: Zip macOS app
+        run: |
+          cd macos-build-artifact
+          zip -r ../IDX-Helper-macOS.zip .
+
+      - name: Zip Windows app
+        run: |
+          cd windows-build-artifact
+          zip -r ../IDX-Helper-Windows.zip .
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            macos-build/IDX-Helper-macOS.zip
-            windows-build/IDX-Helper-Windows.zip
+            IDX-Helper-macOS.zip
+            IDX-Helper-Windows.zip
