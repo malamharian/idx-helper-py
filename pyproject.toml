@@ -1,0 +1,9 @@
+[project]
+name = "idx-helper"
+version = "0.1.0"
+description = "Download laporan keuangan dari IDX"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "flet>=0.27",
+    "requests>=2.28",
+]
