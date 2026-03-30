@@ -1,0 +1,77 @@
+# docs: https://docs.flet.dev/publish/#github-actions/
+
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  UV_PYTHON: 3.12
+  PYTHONUTF8: 1
+  FLET_CLI_NO_RICH_OUTPUT: 1
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            runner: macos-latest
+            build_cmd: "flet build macos"
+            artifact_path: build/macos
+
+          - name: windows
+            runner: windows-latest
+            build_cmd: "flet build windows"
+            artifact_path: build/windows
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build app
+        shell: bash
+        run: |
+          uv run ${{ matrix.build_cmd }} --yes --verbose --product "IDX Helper"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v5.0.0
+        with:
+          name: ${{ matrix.name }}-build-artifact
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          overwrite: false
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Zip macOS app
+        run: |
+          cd macos-build-artifact
+          zip -r ../IDX-Helper-macOS.zip .
+
+      - name: Zip Windows app
+        run: |
+          cd windows-build-artifact
+          zip -r ../IDX-Helper-Windows.zip .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            IDX-Helper-macOS.zip
+            IDX-Helper-Windows.zip
